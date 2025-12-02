@@ -1359,7 +1359,8 @@ class Nebula(QMainWindow):
             logger.debug(f"Error saving configuration: {e}")
 
     def clear_screen(self, _=None):
-        self.command_input_area.terminal.write("clear\n")
+        self.central_display_area.clear()
+        self.command_input_area.terminal.write("\n")
 
     def open_help(self, _=None):
         try:

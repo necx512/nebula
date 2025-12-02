@@ -22,7 +22,7 @@ from = "src"
 nebula = "nebula.nebula:main"
 
 [tool.poetry.dependencies]
-python = ">=3.11,<=3.13.3"
+python = ">=3.11,<=3.14"
 Cython = "*"
 IPython = "*"
 PyQt6 = "*"

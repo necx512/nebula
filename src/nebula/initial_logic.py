@@ -184,16 +184,14 @@ class MainApplication(QApplication):
         logger.debug("main window loading signal received")
         if data:
             try:
-                logger.debug("Closing progress window")
-                # self.progressWindow.close()
-                self.progressWindow.deleteLater()
-
-                logger.debug("Showing main window")
-                self.mainWindow = Nebula(
-                    data["engagement_folder"]
-                )  # Create the main window here
+                logger.debug("Preparing to show main window")
+                self.mainWindow = Nebula(data["engagement_folder"])
                 self.mainWindow.show()
-                self.progressWindow.close()
+                if self.progressWindow:
+                    logger.debug("Closing progress window")
+                    self.progressWindow.close()
+                    self.progressWindow.deleteLater()
+                    self.progressWindow = None
                 QTimer.singleShot(0, self.splash_finished)
             except Exception as e:
                 logger.exception("An error occurred: %s", e)

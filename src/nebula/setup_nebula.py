@@ -2,10 +2,10 @@ import json
 import os
 import warnings
 
-from PyQt6.QtCore import QFile, QSettings, pyqtSignal
-from PyQt6.QtWidgets import (QApplication, QFileDialog, QHBoxLayout, QLabel,
-                             QLineEdit, QMessageBox, QPushButton, QTextEdit,
-                             QVBoxLayout, QWidget)
+from PyQt6.QtCore import QFile, QSettings, Qt, pyqtSignal
+from PyQt6.QtWidgets import (QApplication, QDialog, QFileDialog, QHBoxLayout,
+                             QLabel, QLineEdit, QMessageBox, QPushButton,
+                             QTextEdit, QVBoxLayout)
 
 from . import constants
 from .log_config import setup_logging
@@ -16,21 +16,29 @@ warnings.filterwarnings("ignore")
 logger = setup_logging(log_file=os.path.join(constants.SYSTEM_LOGS_DIR, "setup.log"))
 
 
-class settings(QWidget):
+class settings(QDialog):
     setupCompleted = pyqtSignal(str)
 
-    def __init__(self):
+    def __init__(self, engagement_folder=None):
         super().__init__()
         self.settings = QSettings("Beryllium Security", "Nebula")
-        self.engagementFolder = None
-        self.engagementName = None
+        self.engagementFolder = engagement_folder
+        self.engagementName = (
+            os.path.basename(engagement_folder) if engagement_folder else None
+        )
 
         self.setObjectName("EngagementSettings")
 
         # Initialize default ChromaDB directory to empty (it is required to be set by the user)
         self.chromadbDir = ""
+        self.threatdbDir = ""
+        self.default_ollama_url = "http://localhost:11434"
+        self.ollama_url = self.default_ollama_url
 
         self.initUI()
+        if self.engagementFolder:
+            self.folderPathLabel.setText(self.engagementName)
+            self.handle_engagement_selection()
 
     def load_stylesheet(self, filename):
         style_file = QFile(filename)
@@ -42,7 +50,14 @@ class settings(QWidget):
         self.load_stylesheet(return_path("config/dark-stylesheet.css"))
         self.setWindowTitle("Engagement Settings")
         self.setObjectName("EngagementSettings")
-        self.setGeometry(100, 100, 400, 500)
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+        )
+        self.setSizeGripEnabled(True)
+        self.setMinimumSize(500, 600)
+        self.resize(700, 800)
 
         layout = QVBoxLayout()
 
@@ -98,6 +113,7 @@ class settings(QWidget):
         # Create an editable QLineEdit with placeholder text
         self.ollamaLineEdit = QLineEdit()
         self.ollamaLineEdit.setPlaceholderText("https://your-ollama-server:port")
+        self.ollamaLineEdit.setText(self.default_ollama_url)
         layout.addWidget(self.ollamaLineEdit)
 
         # --- ChromaDB Directory Selection (Required) ---
@@ -179,16 +195,18 @@ class settings(QWidget):
                 self.engagementName = os.path.basename(folder_path)
                 self.folderPathLabel.setText(self.engagementName)
                 logger.info(f"Engagement folder set to: {folder_path}")
-                self.loadEngagementDetails()
-                self.enableSettings(True)
+                self.handle_engagement_selection()
         except Exception as e:
             logger.error(f"Error selecting folder: {e}")
             logger.debug("Failed in selectFolder")
 
     def selectChromaDBDir(self):
         try:
+            start_dir = (
+                self.chromadbDir or self.engagementFolder or os.path.expanduser("~")
+            )
             selected_dir = QFileDialog.getExistingDirectory(
-                self, "Select ChromaDB Directory"
+                self, "Select ChromaDB Directory", start_dir
             )
             if selected_dir:
                 self.chromadbDir = selected_dir
@@ -199,8 +217,11 @@ class settings(QWidget):
 
     def selectthreatDBDir(self):
         try:
+            start_dir = (
+                self.threatdbDir or self.engagementFolder or os.path.expanduser("~")
+            )
             selected_dir = QFileDialog.getExistingDirectory(
-                self, "Select threatDB Directory"
+                self, "Select threatDB Directory", start_dir
             )
             if selected_dir:
                 self.threatdbDir = selected_dir
@@ -208,6 +229,36 @@ class settings(QWidget):
                 logger.info(f"threatDB directory updated to: {selected_dir}")
         except Exception as e:
             logger.error(f"Error selecting threatDB directory: {e}")
+
+    def handle_engagement_selection(self):
+        self.prefill_paths_with_engagement()
+        self.loadEngagementDetails()
+        self.apply_default_paths()
+        self.enableSettings(True)
+
+    def apply_default_paths(self):
+        if not self.engagementFolder:
+            return
+
+        if not self.chromadbDirLineEdit.text().strip():
+            self.chromadbDir = self.engagementFolder
+            self.chromadbDirLineEdit.setText(self.engagementFolder)
+
+        if not self.threatdbDirLineEdit.text().strip():
+            self.threatdbDir = self.engagementFolder
+            self.threatdbDirLineEdit.setText(self.engagementFolder)
+
+        if not self.ollamaLineEdit.text().strip():
+            self.ollama_url = self.default_ollama_url
+            self.ollamaLineEdit.setText(self.default_ollama_url)
+
+    def prefill_paths_with_engagement(self):
+        if not self.engagementFolder:
+            return
+        self.chromadbDir = self.engagementFolder
+        self.threatdbDir = self.engagementFolder
+        self.chromadbDirLineEdit.setText(self.engagementFolder)
+        self.threatdbDirLineEdit.setText(self.engagementFolder)
 
     def loadEngagementDetails(self):
         if not self.engagementFolder:
@@ -228,13 +279,16 @@ class settings(QWidget):
                 self.urlsInput.setText("\n".join(details.get("urls", [])))
                 self.lookoutInput.setText("\n".join(details.get("lookout_items", [])))
                 self.model_name = details.get("model")
-                self.ollama_url = details.get("ollama_url", "")
+                self.ollama_url = details.get(
+                    "ollama_url", self.default_ollama_url
+                )
                 self.modelLineEdit.setText(self.model_name)
 
                 # Load the ChromaDB directory from details if available.
-                self.chromadbDir = details.get("chromadb_dir", "")
+                default_dir = self.engagementFolder or ""
+                self.chromadbDir = details.get("chromadb_dir", default_dir)
                 self.chromadbDirLineEdit.setText(self.chromadbDir)
-                self.threatdbDir = details.get("threatdb_dir", "")
+                self.threatdbDir = details.get("threatdb_dir", default_dir)
                 self.threatdbDirLineEdit.setText(self.threatdbDir)
                 self.ollamaLineEdit.setText(self.ollama_url)
                 return details

@@ -1,8 +1,9 @@
+import os
 import sys
 import warnings
 
 from PyQt6.QtCore import (QFile, QObject, QRunnable, Qt, QThread, QThreadPool,
-                          QTimer, pyqtSignal)
+                          QTimer, QSettings, pyqtSignal)
 from PyQt6.QtGui import (  # This module helps in opening URLs in the default browser
     QFont, QIcon)
 from PyQt6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QLabel,
@@ -137,6 +138,7 @@ class MainApplication(QApplication):
         self.thread_pool = QThreadPool()
         self.worker_signals = WorkerSignals()
         self.worker_signals.main_window_loaded.connect(self.on_main_window_loaded)
+        self.user_settings = QSettings("Beryllium Security", "Nebula")
 
         with open(return_path("config/dark-stylesheet.css"), "r") as file:
             self.setStyleSheet(file.read())
@@ -149,13 +151,19 @@ class MainApplication(QApplication):
 
     def show_setup(self):
         self.config = configuration_manager.ConfigManager()
-        self.setupWindow = settings()
+        last_engagement = self.user_settings.value("last_directory", "", type=str)
+        if last_engagement and os.path.isdir(last_engagement):
+            default_engagement = last_engagement
+        else:
+            default_engagement = None
+        self.setupWindow = settings(engagement_folder=default_engagement)
         self.setupWindow.setupCompleted.connect(self.update_engagement_folder)
         self.setupWindow.show()
 
     def update_engagement_folder(self, text: str):
         logger.debug(f"Updating engagement folder as {text}")
         self.engagement_folder = text
+        self.user_settings.setValue("last_directory", text)
         self.config.setengagement_folder(text)
         self.init_main_window()
 
@@ -176,16 +184,14 @@ class MainApplication(QApplication):
         logger.debug("main window loading signal received")
         if data:
             try:
-                logger.debug("Closing progress window")
-                # self.progressWindow.close()
-                self.progressWindow.deleteLater()
-
-                logger.debug("Showing main window")
-                self.mainWindow = Nebula(
-                    data["engagement_folder"]
-                )  # Create the main window here
+                logger.debug("Preparing to show main window")
+                self.mainWindow = Nebula(data["engagement_folder"])
                 self.mainWindow.show()
-                self.progressWindow.close()
+                if self.progressWindow:
+                    logger.debug("Closing progress window")
+                    self.progressWindow.close()
+                    self.progressWindow.deleteLater()
+                    self.progressWindow = None
                 QTimer.singleShot(0, self.splash_finished)
             except Exception as e:
                 logger.exception("An error occurred: %s", e)

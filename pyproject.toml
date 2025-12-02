@@ -22,7 +22,7 @@ from = "src"
 nebula = "nebula.nebula:main"
 
 [tool.poetry.dependencies]
-python = ">=3.11,<=3.13.3"
+python = ">=3.11,<=3.13.9"
 Cython = "*"
 IPython = "*"
 PyQt6 = "*"
@@ -48,7 +48,6 @@ typing-extensions = "*"
 langchain-community = "0.3.16"
 langchain-core = "*"
 accelerate = "*"
-bitsandbytes = "*"
 duckduckgo-search = "*"
 toml = "*"
 setuptools = "*"
@@ -63,6 +62,7 @@ langchain_chroma = "*"
 unstructured = "*"
 jq = "*"
 qdarkstyle = "*"
+pexpect = "^4.9.0"
 
 [tool.poetry.extras]
 flash = [ "flash-attn",]

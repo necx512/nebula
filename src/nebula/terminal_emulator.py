@@ -1,21 +1,20 @@
 import logging
 import os
-import pty
 import re
-import select
 import shutil
-import signal
 import time
 import warnings
+
+import pexpect
 
 from langchain.agents import (AgentExecutor, AgentType,
                               create_openai_tools_agent, initialize_agent)
 from langchain_community.tools import DuckDuckGoSearchRun, ShellTool
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from PyQt6 import QtCore
-from PyQt6.QtCore import (QFile, QFileSystemWatcher, QObject, QRunnable,
-                          QStringListModel, Qt, QThread, QThreadPool, QTimer,
-                          pyqtSignal)
+from PyQt6.QtCore import (QFile, QFileSystemWatcher, QObject, QProcess,
+                          QProcessEnvironment, QSocketNotifier, QRunnable,
+                          QStringListModel, Qt, QThreadPool, QTimer, pyqtSignal)
 from PyQt6.QtGui import QAction, QIcon, QMouseEvent, QPixmap, QTextCursor
 from PyQt6.QtWidgets import (QApplication, QCompleter, QFileDialog,
                              QHBoxLayout, QLineEdit, QMainWindow, QMenu,
@@ -216,7 +215,7 @@ class AgentTaskRunner(QRunnable):
                     response = agent_executor.invoke({"input": self.query})
 
             except Exception as e:
-                logger.error("Error initializing tool-calling agent:", e)
+                logger.error("Error initializing tool-calling agent: %s", e)
                 raise e
 
             logger.info("Building prompt for default endpoint.")
@@ -365,7 +364,8 @@ class TerminalEmulatorWindow(QMainWindow):
         self.center()
 
     def clear_screen(self, _=None):
-        self.command_input_area.terminal.write("reset \n")
+        self.central_display_area.clear()
+        self.command_input_area.terminal.write("\n")
 
     def reset_terminal(self):
         self.command_input_area.terminal.password_mode.emit(False)
@@ -519,7 +519,156 @@ class TerminalEmulatorWindow(QMainWindow):
         self.central_display_area.insertPlainText(data)
 
 
-class TerminalEmulator(QThread):
+class BaseShellBackend(QObject):
+    data_ready = pyqtSignal(str)
+    error = pyqtSignal(str)
+    finished = pyqtSignal(int)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+    def start(self):
+        raise NotImplementedError
+
+    def write(self, data: str):
+        raise NotImplementedError
+
+    def stop(self):
+        raise NotImplementedError
+
+    def restart(self):
+        self.stop()
+        self.start()
+
+
+class QProcessShellBackend(BaseShellBackend):
+    def __init__(self, shell_command_resolver, parent=None):
+        super().__init__(parent)
+        self._resolver = shell_command_resolver
+        self.process = QProcess(self)
+        self.process.setProcessChannelMode(
+            QProcess.ProcessChannelMode.MergedChannels
+        )
+        self.process.readyReadStandardOutput.connect(self._emit_output)
+        self.process.errorOccurred.connect(self._handle_error)
+        self.process.finished.connect(self._handle_finished)
+
+    def start(self):
+        if self.process.state() == QProcess.ProcessState.Running:
+            return
+
+        program, arguments, env = self._resolver()
+        environment = QProcessEnvironment.systemEnvironment()
+        if env:
+            for key, value in env.items():
+                environment.insert(key, value)
+        self.process.setProcessEnvironment(environment)
+        self.process.start(program, arguments)
+
+    def write(self, data: str):
+        if self.process.state() != QProcess.ProcessState.Running:
+            return
+        self.process.write(data.encode())
+
+    def stop(self):
+        if self.process.state() == QProcess.ProcessState.NotRunning:
+            return
+        self.process.terminate()
+        if not self.process.waitForFinished(2000):
+            self.process.kill()
+            self.process.waitForFinished(1000)
+
+    def _emit_output(self):
+        data = bytes(self.process.readAllStandardOutput()).decode(
+            "utf-8", errors="ignore"
+        )
+        if data:
+            self.data_ready.emit(data)
+
+    def _handle_error(self, error):
+        self.error.emit(str(error))
+
+    def _handle_finished(self, exit_code, _status):
+        self.finished.emit(exit_code)
+
+
+class PexpectShellBackend(BaseShellBackend):
+    def __init__(self, shell_command_resolver, parent=None):
+        super().__init__(parent)
+        self._resolver = shell_command_resolver
+        self.child = None
+        self._notifier = None
+
+    def start(self):
+        if self.child and self.child.isalive():
+            return
+
+        program, arguments, env = self._resolver()
+        env_vars = os.environ.copy()
+        if env:
+            env_vars.update(env)
+
+        try:
+            self.child = pexpect.spawn(
+                program,
+                arguments,
+                encoding="utf-8",
+                codec_errors="ignore",
+                env=env_vars,
+            )
+        except Exception as exc:
+            self.error.emit(str(exc))
+            self.child = None
+            return
+
+        self._notifier = QSocketNotifier(
+            self.child.child_fd, QSocketNotifier.Type.Read, self
+        )
+        self._notifier.activated.connect(self._read_ready)
+        self._notifier.setEnabled(True)
+
+    def write(self, data: str):
+        if not self.child or not self.child.isalive():
+            return
+        try:
+            self.child.write(data)
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+    def stop(self):
+        if self._notifier:
+            self._notifier.setEnabled(False)
+            self._notifier.deleteLater()
+            self._notifier = None
+
+        if self.child:
+            try:
+                self.child.terminate(force=True)
+            except Exception:
+                pass
+            finally:
+                self.child = None
+
+    def _read_ready(self):
+        if not self.child:
+            return
+        try:
+            chunk = self.child.read_nonblocking(size=4096, timeout=0)
+        except pexpect.exceptions.TIMEOUT:
+            return
+        except pexpect.exceptions.EOF:
+            self.finished.emit(self.child.exitstatus or 0)
+            self.stop()
+            return
+        except Exception as exc:
+            self.error.emit(str(exc))
+            return
+
+        if chunk:
+            self.data_ready.emit(chunk)
+
+
+class TerminalEmulator(QObject):
     data_ready = pyqtSignal(str)
     current_directory_changed = pyqtSignal(str)
     autonomous_terminal_execution_iteration_is_done = pyqtSignal()
@@ -534,7 +683,6 @@ class TerminalEmulator(QThread):
         self.autonomous_mode = False
         self.number_of_autonomous_commands = 0
         self.current_command_concatenated_in_autonomous_mode = ""
-        self.shell_pid = None
         self.web_mode = ""
         self.prompt_signs = [
             "$",  # Common Unix/Linux Bash shell for regular users
@@ -556,55 +704,103 @@ class TerminalEmulator(QThread):
             )
         )
         self.incognito_mode = False
-        try:
-            self.master, self.slave = pty.openpty()
-            self.shell_pid = os.fork()
+        backend_preference = os.environ.get(
+            "NEBULA_TERMINAL_BACKEND", "qprocess"
+        ).lower()
+        if backend_preference == "pexpect":
+            self.backend = PexpectShellBackend(
+                self._resolve_shell_command, parent=self
+            )
+            self.backend_mode = "pexpect"
+        else:
+            self.backend = QProcessShellBackend(
+                self._resolve_shell_command, parent=self
+            )
+            self.backend_mode = "qprocess"
+        self.backend.data_ready.connect(self._handle_backend_output)
+        self.backend.error.connect(self._handle_backend_error)
+        self.backend.finished.connect(self._handle_backend_finished)
+        self._output_buffer = ""
+        self._auto_restart = True
 
-            if self.shell_pid == 0:
-                try:
-                    utilities.set_terminal_size(self.slave, 90, 90)
-                    os.environ["TERM"] = "xterm-256color"
-                    os.setsid()
-                    os.dup2(self.slave, 0)
-                    os.dup2(self.slave, 1)
-                    os.dup2(self.slave, 2)
+    def start(self):
+        self.backend.start()
 
-                    if self.slave > 2:
-                        os.close(self.slave)
+    def _resolve_shell_command(self):
+        env = {"TERM": "xterm-256color"}
+        preferred_shell = os.environ.get("NEBULA_TERMINAL_SHELL")
 
-                    default_shell = os.environ.get("SHELL", "/bin/bash")
+        if os.name == "nt":
+            shell_path = os.environ.get("COMSPEC", "cmd.exe")
+            env.setdefault("PS1", "nebula> ")
+            return shell_path, [], env
 
-                    if "zsh" in default_shell:
-                        os.environ["PS1"] = "nebula %~%# "
-                        os.execv(
-                            default_shell, [default_shell, "-d", "-f", "--interactive"]
-                        )
+        if preferred_shell:
+            shell_path = preferred_shell
+        elif self.backend_mode == "qprocess":
+            shell_path = "/bin/bash"
+        else:
+            shell_path = os.environ.get("SHELL", "/bin/bash")
 
-                    elif "bash" in default_shell:
-                        os.environ["PS1"] = "nebula \\w\\$ "
-                        os.execv(
-                            default_shell, [default_shell, "--noprofile", "--norc"]
-                        )
+        shell_name = os.path.basename(shell_path)
+        arguments = []
 
-                    else:
-                        os.execv(default_shell, [default_shell])
+        if "zsh" in shell_name:
+            env["PS1"] = "nebula %~%# "
+            if self.backend_mode == "pexpect":
+                arguments = ["-d", "-f", "--interactive"]
+            else:
+                arguments = ["-d", "-f"]
+        elif "bash" in shell_name:
+            env["PS1"] = "nebula \\w\\$ "
+            arguments = ["--noprofile", "--norc"]
+            if self.backend_mode == "qprocess":
+                arguments.append("-i")
+        else:
+            env.setdefault("PS1", "nebula> ")
 
-                except Exception as e:
-                    logger.error(f"Error in child process: {e}")
-                    os._exit(1)
+        return shell_path, arguments, env
 
-            logger.debug("Pseudo-terminal set up successfully")
+    def _handle_backend_output(self, raw_text: str):
+        if not raw_text:
+            return
 
-        except Exception as e:
-            logger.error(f"Error setting up pseudo-terminal: {e}")
+        if utilities.is_linux_asking_for_password(raw_text):
+            self.password_mode.emit(True)
+            processed_data = utilities.process_output(raw_text)
+            if processed_data:
+                self.data_ready.emit(processed_data)
+            return
 
-    def check_for_prompt(self, data):
+        self.password_mode.emit(False)
+        self.check_for_prompt(raw_text)
+
+        processed_data = utilities.process_output(raw_text)
+        if not processed_data:
+            return
+
+        self._output_buffer += processed_data
+        if "\n" in self._output_buffer or any(
+            prompt in self._output_buffer for prompt in self.prompt_signs
+        ):
+            self.data_ready.emit(self._output_buffer)
+            self._output_buffer = ""
+
+    def _handle_backend_error(self, error_message: str):
+        logger.error(f"Terminal backend error: {error_message}")
+
+    def _handle_backend_finished(self, exit_code: int):
+        logger.info(f"Terminal backend exited with code {exit_code}")
+        self.busy.emit(False)
+        if self._auto_restart:
+            QTimer.singleShot(250, self.backend.start)
+
+    def check_for_prompt(self, data: str):
         logger.info("check_for_prompt: Starting to process incoming data.")
         self.CONFIG = self.manager.load_config()
         logger.debug("Configuration loaded: %s", self.CONFIG)
 
         try:
-            # Handle the "pwd" command early
             if self.current_command == "pwd":
                 logger.info("Received 'pwd' command. Extracting current directory.")
                 pwd_output = self.extract_current_directory(data)
@@ -617,25 +813,21 @@ class TerminalEmulator(QThread):
                     self.current_command = ""
                     logger.debug("Reset current command after processing 'pwd'.")
 
-            # Clean and decode data
-            non_printable_pattern = b"[^\x20-\x7E\t\n]"
+            non_printable_pattern = r"[^\x20-\x7E\t\n]"
             logger.debug("Cleaning raw data using non-printable pattern.")
-            cleaned_data = re.sub(non_printable_pattern, b"", data)
-            logger.debug("Cleaned data length: %d", len(cleaned_data))
-            decoded_data = cleaned_data.decode("utf-8")
+            cleaned_data = re.sub(non_printable_pattern, "", data)
             logger.debug(
-                "Decoded data length: %d, preview: %s",
-                len(decoded_data),
-                decoded_data[:100],
+                "Cleaned data length: %d, preview: %s",
+                len(cleaned_data),
+                cleaned_data[:100],
             )
 
-            formatted_decoded_data = utilities.process_output(decoded_data)
+            formatted_decoded_data = utilities.process_output(cleaned_data) or ""
             logger.debug(
                 "Processed formatted data, preview: %s", formatted_decoded_data[:100]
             )
 
-            # Check for the custom prompt pattern
-            if re.search(constants.CUSTOM_PROMPT_PATTERN, decoded_data):
+            if re.search(constants.CUSTOM_PROMPT_PATTERN, cleaned_data):
                 logger.info("Custom prompt detected in decoded data.")
 
                 if self.incognito_mode:
@@ -651,7 +843,6 @@ class TerminalEmulator(QThread):
                     )
 
                 logger.debug("Autonomous mode state: %s", self.autonomous_mode)
-                # Non-autonomous mode: log command if it's included and doesn't contain "reset"
                 if (
                     not self.autonomous_mode
                     and utilities.is_included_command(self.current_command, self.CONFIG)
@@ -672,17 +863,10 @@ class TerminalEmulator(QThread):
                     )
                     self.current_command = ""
                     self.current_command_output = ""
-                    logger.debug(
-                        "Logged command: %s, output length: %d",
-                        self.current_command,
-                        len(self.current_command_output),
-                    )
+                    logger.debug("Logged command and reset current command data.")
                     self.busy.emit(False)
                     logger.debug("Busy signal emitted: False")
-                    self.current_command_output = ""
-                    logger.debug("Reset current command output.")
 
-                # Autonomous mode with autonomous jobs > 0
                 elif (
                     self.autonomous_mode
                     and "reset" not in self.current_command
@@ -712,7 +896,6 @@ class TerminalEmulator(QThread):
                     self.busy.emit(True)
                     logger.debug("Busy signal emitted: True")
 
-                # Autonomous mode with autonomous jobs == 0 and included command
                 elif (
                     self.autonomous_mode
                     and "reset" not in self.current_command
@@ -764,7 +947,6 @@ class TerminalEmulator(QThread):
                     self.busy.emit(False)
                     logger.debug("Busy signal emitted: False")
 
-                # Default branch: clear current command output and emit signals as needed
                 else:
                     logger.info(
                         "No valid prompt handling branch matched; resetting command output."
@@ -779,7 +961,6 @@ class TerminalEmulator(QThread):
                     self.busy.emit(False)
                     logger.debug("Busy signal emitted: False")
 
-            # No prompt detected: Append the formatted data to the current output
             else:
                 logger.debug(
                     "No custom prompt detected. Appending formatted data to current command output."
@@ -790,8 +971,6 @@ class TerminalEmulator(QThread):
                     len(self.current_command_output),
                 )
 
-        except UnicodeDecodeError as e:
-            logger.error("Error decoding data: %s", e)
         except re.error as e:
             logger.error("Error in regex search: %s", e)
         except Exception as e:
@@ -799,168 +978,54 @@ class TerminalEmulator(QThread):
 
         logger.info("check_for_prompt: Finished processing data.")
 
-    def extract_current_directory(self, data):
+    def extract_current_directory(self, data: str):
         pattern = r"^(.+)\nnebula\$"
-        match = re.search(pattern, data.decode("utf-8", errors="ignore"), re.MULTILINE)
+        match = re.search(pattern, data, re.MULTILINE)
         if match:
             logger.debug(f"PWD is {match}")
             return match.group(1).strip()
 
         return None
 
-    def process_terminal_output(self, data):
-        processed_data = bytearray()
-        for byte in data:
-            if byte == 8:  # Backspace character in ASCII
-                if processed_data:
-                    processed_data.pop()  # Remove the last character added
-            else:
-                processed_data.append(byte)
-        return bytes(processed_data)
-
-    def run(self, _=None):
-        buffer = ""
-        while True:
-            # Attempt to re-initialize if self.master is None (but only if necessary)
-            if self.master is None:
-                logger.debug(
-                    "Detected closed master file descriptor, attempting to reinitialize."
-                )
-                self.reset_terminal()
-                if self.master is None:
-                    logger.error("Failed to reinitialize terminal. Retrying...")
-                    time.sleep(1)  # Wait a bit before retrying to avoid spamming.
-                    continue
-
-            try:
-                r, _, _ = select.select([self.master], [], [], 0.1)
-                if r:
-                    data = os.read(self.master, 4096)
-
-                    # Process the data as before
-                    if data:
-                        data = self.process_terminal_output(data)
-                        if utilities.is_linux_asking_for_password(data):
-                            self.password_mode.emit(True)
-
-                            processed_data = utilities.process_output(
-                                data.decode("utf-8", errors="ignore")
-                            )
-                            self.data_ready.emit(processed_data)
-                            continue
-
-                        self.check_for_prompt(data)
-
-                        processed_data = utilities.process_output(
-                            data.decode("utf-8", errors="ignore")
-                        )
-
-                        # logger.debug(f"Processed data: {processed_data}")
-
-                        # Here you handle the processed data, like emitting it to the UI or storing it.
-                        buffer += processed_data
-                        if "\n" in buffer or any(
-                            prompt in buffer for prompt in self.prompt_signs
-                        ):
-                            self.data_ready.emit(
-                                buffer
-                            )  # Assuming this is a method to handle the ready data
-                            buffer = ""
-            except OSError as e:
-                logger.error(f"Error with file operations on master: {e}")
-                self.master = None  # Reset master to handle in next loop iteration
-                continue
-            except Exception as e:
-                # Handle other exceptions that may occur
-                logger.error(f"Unexpected error: {e}")
-                continue  # Depending on the error, you may choose not to continue
-
     def reset_terminal(self):
-
         self.number_of_autonomous_commands = 0
         self.current_command = ""
+        self.current_command_output = ""
+        self.current_command_concatenated_in_autonomous_mode = ""
+        self._output_buffer = ""
         self.busy.emit(False)
-        # Terminate current terminal session
-        if self.shell_pid > 0:
-            try:
-                os.kill(
-                    self.shell_pid, signal.SIGTERM
-                )  # Send termination signal to the shell process
-            except Exception as e:
-                logger.error(f"Error killing terminal process: {e}")
+        self.password_mode.emit(False)
 
-        # Close master and slave ptys if they exist
         try:
-            os.close(self.master)
-            os.close(self.slave)
+            self.backend.restart()
         except Exception as e:
-            logger.error(f"Error closing pseudo-terminals: {e}")
-
-        # Re-initialize terminal (similar to what is done in __init__)
-        try:
-            self.master, self.slave = pty.openpty()
-            self.shell_pid = os.fork()
-
-            if self.shell_pid == 0:  # Child process
-                try:
-                    utilities.set_terminal_size(self.slave, 90, 90)
-                    os.environ["TERM"] = "xterm-256color"
-                    os.setsid()
-                    os.dup2(self.slave, 0)
-                    os.dup2(self.slave, 1)
-                    os.dup2(self.slave, 2)
-
-                    if self.slave > 2:
-                        os.close(self.slave)
-
-                    default_shell = os.environ.get("SHELL", "/bin/bash")
-                    # Set up the shell environment again
-                    if "zsh" in default_shell:
-                        os.environ["PS1"] = "nebula %~%# "
-                        os.execv(
-                            default_shell, [default_shell, "-d", "-f", "--interactive"]
-                        )
-                    elif "bash" in default_shell:
-                        os.environ["PS1"] = "nebula \\w\\$ "
-                        os.execv(
-                            default_shell, [default_shell, "--noprofile", "--norc"]
-                        )
-                    else:
-                        os.execv(default_shell, [default_shell])
-
-                except Exception as e:
-                    logger.error(f"Error in child process during reset: {e}")
-                    os._exit(1)
-
-            logger.debug("Terminal reset and pseudo-terminal set up successfully")
-
-        except Exception as e:
-            logger.error(f"Error resetting pseudo-terminal: {e}")
+            logger.error(f"Error resetting shell backend: {e}")
 
     def write(self, data):
-        # logger.debug(f"writing data: {data}")
-        if data == "<Ctrl-C>":
-            os.write(self.master, b"\x03")
-        elif data == "<Ctrl-\\>":
-            os.write(self.master, b"\x1c")
-        elif data == "<Ctrl-Z>":
-            os.write(self.master, b"\x1a")
-        elif data == "<Ctrl-D>":
-            os.write(self.master, b"\x04")
+        control_map = {
+            "<Ctrl-C>": "\x03",
+            "<Ctrl-\\>": "\x1c",
+            "<Ctrl-Z>": "\x1a",
+            "<Ctrl-D>": "\x04",
+        }
+        arrow_map = {
+            "<Up>": "\x1b[A",
+            "<Down>": "\x1b[B",
+            "<Right>": "\x1b[C",
+            "<Left>": "\x1b[D",
+        }
 
-        elif data == "<Up>":
-            os.write(self.master, b"\x1b[A")
-        elif data == "<Down>":
-            os.write(self.master, b"\x1b[B")
-        elif data == "<Right>":
-            os.write(self.master, b"\x1b[C")
-        elif data == "<Left>":
-            os.write(self.master, b"\x1b[D")
+        if data in control_map:
+            self.backend.write(control_map[data])
+            return
 
-        else:
-            # logger.debug(f"data encode: {data.encode()}")
+        if data in arrow_map:
+            self.backend.write(arrow_map[data])
+            return
+
+        if data:
             self.busy.emit(True)
-            os.write(self.master, data.encode())
+            self.backend.write(data)
 
     def update_current_command(self, command):
         if not self.autonomous_mode:
@@ -1064,7 +1129,7 @@ class CommandInputArea(QLineEdit):
         self.history_watcher = QFileSystemWatcher([self.CONFIG["HISTORY_FILE"]])
         self.history_watcher.fileChanged.connect(self.load_command_history)
         self.commands = []
-        self.input_mode = ""
+        self.input_mode = "terminal"
         self.history_index = -1
         self.returnPressed.connect(lambda: self.execute_command(self.text()))
 

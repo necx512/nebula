@@ -403,6 +403,7 @@ class Nebula(QMainWindow):
         logger.debug("begin showing main window")
         self.engagement_details_file = None
         self.help_actions = []
+        self.help_window = None
         if engagement_folder:
             logger.debug(f"engagement folder has been set to {engagement_folder}")
             self.engagement_details_file = os.path.join(
@@ -510,6 +511,7 @@ class Nebula(QMainWindow):
             command_input_area=self.command_input_area,
         )
         self.input_mode_signal.connect(self.command_input_area.set_input_mode)
+        self.input_mode_signal.emit("terminal")
 
         self.central_display_area.notes_signal_from_central_display_area.connect(
             self.command_input_area.execute_api_call
@@ -1309,7 +1311,9 @@ class Nebula(QMainWindow):
 
     def open_engagement(self):
         try:
-            self.setupWindow = settings()
+            self.setupWindow = settings(
+                engagement_folder=self.manager.engagement_folder
+            )
             self.setupWindow.setupCompleted.connect(self.update_engagement_folder)
             self.setupWindow.show()
         except Exception as e:
@@ -1356,7 +1360,8 @@ class Nebula(QMainWindow):
             logger.debug(f"Error saving configuration: {e}")
 
     def clear_screen(self, _=None):
-        self.command_input_area.terminal.write("reset \n")
+        self.central_display_area.clear()
+        self.command_input_area.terminal.write("\n")
 
     def open_help(self, _=None):
         try:

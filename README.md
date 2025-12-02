@@ -27,7 +27,7 @@ Nebula is a cutting-edge, AI-powered penetration testing tool designed for cyber
 
 For CPU-Based Inference(Ollama)(Note that Ollama Supports GPU too):
 - At least 16GB of RAM 
-- Python 3.11 or higher
+- Python 3.11 – 3.13.9
 - [Ollama](https://ollama.com/)
 
 **Installation Command:**
@@ -55,7 +55,7 @@ Then enter the model's exact name as it appears in Ollama in the engagement sett
 To use OpenAI models, add your API keys to your env like so
 
 ```bash
-export OpenAI_API_KEY="sk-blah-blaj"
+export OPENAI_API_KEY="sk-blah-blaj"
 ```
 
 Then enter the OpenAI model's exact name in the engagement settings.
@@ -122,4 +122,3 @@ Logs are located at `/home/[your_username]/.local/share/nebula/logs`. You would 
 
 - Have questions or need help? [Open an Issue](https://github.com/berylliumsec/nebula/issues) on GitHub.
 - For comprehensive guides, check out our [Video Guide](https://www.berylliumsec.com/nebula-pro-feature-guide) and [User Manual](/MANUAL.md).
-

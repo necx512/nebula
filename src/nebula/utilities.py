@@ -223,7 +223,7 @@ def get_llm_instance(model: str, ollama_url: str = "", signals: pyqtSignal = Non
                 llm_instance = ChatOllama(model=model)
         except Exception as e:
             signals.error.emit(str(e))
-            logger.error("Error Loading Ollama", e)
+            logger.error("Error Loading Ollama: %s", e)
             raise e
     return llm_instance, ollama_or_openai
 

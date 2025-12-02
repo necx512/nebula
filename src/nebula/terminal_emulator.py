@@ -364,7 +364,7 @@ class TerminalEmulatorWindow(QMainWindow):
         self.center()
 
     def clear_screen(self, _=None):
-        self.command_input_area.terminal.write("reset \n")
+        self.command_input_area.terminal.write("clear\n")
 
     def reset_terminal(self):
         self.command_input_area.terminal.password_mode.emit(False)

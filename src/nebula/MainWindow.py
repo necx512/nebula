@@ -1310,7 +1310,9 @@ class Nebula(QMainWindow):
 
     def open_engagement(self):
         try:
-            self.setupWindow = settings()
+            self.setupWindow = settings(
+                engagement_folder=self.manager.engagement_folder
+            )
             self.setupWindow.setupCompleted.connect(self.update_engagement_folder)
             self.setupWindow.show()
         except Exception as e:
@@ -1357,7 +1359,7 @@ class Nebula(QMainWindow):
             logger.debug(f"Error saving configuration: {e}")
 
     def clear_screen(self, _=None):
-        self.command_input_area.terminal.write("reset \n")
+        self.command_input_area.terminal.write("clear\n")
 
     def open_help(self, _=None):
         try:

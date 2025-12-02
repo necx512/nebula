@@ -403,6 +403,7 @@ class Nebula(QMainWindow):
         logger.debug("begin showing main window")
         self.engagement_details_file = None
         self.help_actions = []
+        self.help_window = None
         if engagement_folder:
             logger.debug(f"engagement folder has been set to {engagement_folder}")
             self.engagement_details_file = os.path.join(
